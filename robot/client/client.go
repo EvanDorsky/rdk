@@ -1149,6 +1149,21 @@ func (rc *RobotClient) StopAll(ctx context.Context, extra map[resource.Name]map[
 // Log sends a log entry to the server. To be used by Golang modules wanting to
 // log over gRPC and not by normal Golang SDK clients.
 func (rc *RobotClient) Log(ctx context.Context, log zapcore.Entry, fields []zap.Field) error {
+	var (
+		stopwatchEnabled = logging.LogStopwatchEnabled()
+		traceID          string
+		encodeStart      time.Time
+		rpcStart         time.Time
+		totalStart       time.Time
+		encodeDur        time.Duration
+	)
+	if stopwatchEnabled {
+		traceID = logging.NextLogStopwatchID()
+		ctx = metadata.AppendToOutgoingContext(ctx, logging.LogStopwatchMetadataKey, traceID)
+		totalStart = time.Now()
+		encodeStart = totalStart
+	}
+
 	message := fmt.Sprintf("%v\t%v", log.Caller.TrimmedPath(), log.Message)
 
 	fieldsP := make([]*structpb.Struct, 0, len(fields))
@@ -1177,7 +1192,23 @@ func (rc *RobotClient) Log(ctx context.Context, log zapcore.Entry, fields []zap.
 		}},
 	}
 
+	if stopwatchEnabled {
+		encodeDur = time.Since(encodeStart)
+		rpcStart = time.Now()
+	}
+
 	_, err := rc.client.Log(ctx, logRequest)
+
+	if stopwatchEnabled {
+		logging.LogStopwatchWrite("MLOG",
+			"id", traceID,
+			"encode", encodeDur,
+			"rpc", time.Since(rpcStart),
+			"total", time.Since(totalStart),
+			"lvl", log.Level.String(),
+			"msg", log.Message,
+		)
+	}
 	return err
 }
 

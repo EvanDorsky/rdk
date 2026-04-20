@@ -21,6 +21,7 @@ import (
 	"go.viam.com/utils"
 	vprotoutils "go.viam.com/utils/protoutils"
 	"go.viam.com/utils/rpc"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -474,8 +475,24 @@ func (s *Server) Log(ctx context.Context, req *pb.LogRequest) (*pb.LogResponse, 
 		Fields: fields,
 	}
 
-	s.robot.Logger().Write(&entry)
+	if logging.LogStopwatchEnabled() {
+		traceID := incomingLogStopwatchID(ctx)
+		logging.WriteWithTraceID(s.robot.Logger(), &entry, traceID)
+	} else {
+		s.robot.Logger().Write(&entry)
+	}
 	return &pb.LogResponse{}, nil
+}
+
+// incomingLogStopwatchID returns the trace id the module attached to this
+// Log RPC, or a fresh local id if none is present.
+func incomingLogStopwatchID(ctx context.Context) string {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if vals := md.Get(logging.LogStopwatchMetadataKey); len(vals) > 0 && vals[0] != "" {
+			return vals[0]
+		}
+	}
+	return "LOCAL-" + logging.NextLogStopwatchID()
 }
 
 // GetCloudMetadata returns app-related information about the robot.

@@ -138,7 +138,10 @@ func RunServer(ctx context.Context, args []string, _ logging.Logger) (err error)
 		registry.AddAppenderToAll(logging.NewStdoutAppender())
 	}
 
-	logging.RegisterEventLogger(rootLogger, "viam-server")
+	eventLoggerCloser := logging.RegisterEventLogger(rootLogger, "viam-server")
+	defer func() {
+		utils.UncheckedError(eventLoggerCloser.Close())
+	}()
 	config.InitLoggingSettings(rootLogger, configLogger, argsParsed.Debug)
 
 	if argsParsed.Version {

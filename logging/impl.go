@@ -313,6 +313,48 @@ func (imp *impl) Write(entry *LogEntry) {
 	}
 }
 
+// WriteWithTraceID is like Write but, when the log stopwatch is enabled,
+// records per-appender fanout timings to the trace file keyed by traceID.
+// Used by Server.Log so module logs can be correlated end-to-end.
+func (imp *impl) WriteWithTraceID(entry *LogEntry, traceID string) {
+	if !LogStopwatchEnabled() {
+		imp.Write(entry)
+		return
+	}
+	fanoutStart := time.Now()
+	imp.testHelper()
+	for _, appender := range imp.appenders {
+		t0 := time.Now()
+		err := appender.Write(entry.Entry, entry.Fields)
+		LogStopwatchWrite("PAPP",
+			"id", traceID,
+			"appender", FormatAppenderName(appender),
+			"dur", time.Since(t0),
+		)
+		if err != nil {
+			fmt.Fprint(os.Stderr, err)
+		}
+	}
+	LogStopwatchWrite("PLOG",
+		"id", traceID,
+		"fanout", time.Since(fanoutStart),
+		"napp", len(imp.appenders),
+		"lvl", entry.Entry.Level.String(),
+		"msg", entry.Entry.Message,
+	)
+}
+
+// WriteWithTraceID writes an entry through logger, recording per-appender
+// timings to the log stopwatch file keyed by traceID when enabled. Falls back
+// to logger.Write if the logger is not the concrete *impl type.
+func WriteWithTraceID(logger Logger, entry *LogEntry, traceID string) {
+	if imp, ok := logger.(*impl); ok {
+		imp.WriteWithTraceID(entry, traceID)
+		return
+	}
+	logger.Write(entry)
+}
+
 // Constructs the log message by forwarding to `fmt.Sprint`. `traceKey` may be the empty string.
 func (imp *impl) format(logLevel Level, traceKey string, args ...interface{}) *LogEntry {
 	logEntry := imp.NewLogEntry()

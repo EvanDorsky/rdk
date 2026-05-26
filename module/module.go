@@ -390,6 +390,15 @@ func (m *Module) RegisterParentConnectionChangeHandler(f func(rc *client.RobotCl
 	m.parentConnChangeFunc = f
 }
 
+// Parent returns the robot client used to talk back to the parent viam-server.
+// Returns nil until the Ready handshake has completed and the parent connection
+// has been established.
+func (m *Module) Parent() *client.RobotClient {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.parent
+}
+
 // SetReady can be set to false if the module is not ready (ex. waiting on hardware).
 func (m *Module) SetReady(ready bool) {
 	m.mu.Lock()

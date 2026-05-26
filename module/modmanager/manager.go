@@ -25,6 +25,7 @@ import (
 	modlib "go.viam.com/rdk/module"
 	modmanageroptions "go.viam.com/rdk/module/modmanager/options"
 	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/robot"
 	"go.viam.com/rdk/robot/framesystem"
 	"go.viam.com/rdk/robot/packages"
 	rutils "go.viam.com/rdk/utils"
@@ -62,7 +63,7 @@ func NewManager(
 		packagesDir:             options.PackagesDir,
 		ftdc:                    options.FTDC,
 		modPeerConnTracker:      options.ModPeerConnTracker,
-		failedModules:           make(map[string]bool),
+		failedModules:           make(map[string]*failedModuleInfo),
 	}
 	return ret, nil
 }
@@ -151,7 +152,17 @@ type Manager struct {
 	modPeerConnTracker *rdkgrpc.ModPeerConnTracker
 
 	failedModulesMu sync.RWMutex
-	failedModules   map[string]bool
+	failedModules   map[string]*failedModuleInfo
+}
+
+// failedModuleInfo records context about a module that has failed to start or
+// crashed at runtime. It is populated by AddToFailedModules and consumed by
+// Status to report per-module health.
+type failedModuleInfo struct {
+	conf                config.Module
+	err                 error
+	lastFailedAt        time.Time
+	consecutiveFailures int
 }
 
 // Close terminates module connections and processes.
@@ -257,7 +268,7 @@ func (mgr *Manager) Add(ctx context.Context, confs ...config.Module) error {
 		// Validate module configs before attempting to add.
 		if err := conf.Validate(""); err != nil {
 			mgr.logger.CErrorw(ctx, "Module config validation error; skipping", "module", conf.Name, "error", err)
-			mgr.AddToFailedModules(conf.Name)
+			mgr.AddToFailedModules(conf.Name, conf, err)
 			errs[i] = err
 			continue
 		}
@@ -272,7 +283,7 @@ func (mgr *Manager) Add(ctx context.Context, confs ...config.Module) error {
 			err := mgr.add(ctx, conf, moduleLogger)
 			if err != nil {
 				moduleLogger.CErrorw(ctx, "Error adding module", "module", conf.Name, "error", err)
-				mgr.AddToFailedModules(conf.Name)
+				mgr.AddToFailedModules(conf.Name, conf, err)
 				errs[i] = err
 				return
 			}
@@ -434,7 +445,7 @@ func (mgr *Manager) Reconfigure(ctx context.Context, conf config.Module) ([]reso
 
 	if err := mgr.startModule(ctx, mod); err != nil {
 		// could not start module during reconfiguration, add it to failedModules
-		mgr.AddToFailedModules(conf.Name)
+		mgr.AddToFailedModules(conf.Name, conf, err)
 		// If re-addition fails, assume all handled resources are orphaned.
 		return handledResourceNames, err
 	}
@@ -897,7 +908,7 @@ func (mgr *Manager) newOnUnexpectedExitHandler(ctx context.Context, mod *module)
 		)
 
 		// Add to failedModules when crash is detected
-		mgr.AddToFailedModules(mod.cfg.Name)
+		mgr.AddToFailedModules(mod.cfg.Name, mod.cfg, errors.Errorf("module exited unexpectedly with code %d", exitCode))
 
 		// There are two relevant calls that may race with a crashing module:
 		// 1. mgr.Remove, which wants to stop the module and remove it entirely
@@ -956,7 +967,7 @@ func (mgr *Manager) newOnUnexpectedExitHandler(ctx context.Context, mod *module)
 				break
 			}
 			// could not restart crashed module, add it to failedModules
-			mgr.AddToFailedModules(mod.cfg.Name)
+			mgr.AddToFailedModules(mod.cfg.Name, mod.cfg, err)
 			unlock()
 			utils.SelectContextOrWait(ctx, oueRestartInterval)
 		}
@@ -1156,11 +1167,26 @@ func getModuleDataParentDirectory(options modmanageroptions.Options) string {
 	return filepath.Join(options.ViamHomeDir, parentModuleDataFolderName, robotID)
 }
 
-// AddToFailedModules adds a failing module to the failedModules map.
-func (mgr *Manager) AddToFailedModules(moduleName string) {
+// AddToFailedModules records a failure for the named module. The conf and err
+// give Status the information it needs to report a meaningful UNHEALTHY entry.
+// Repeated calls for the same name increment attemptCount and refresh the
+// recorded error and timestamp.
+func (mgr *Manager) AddToFailedModules(moduleName string, conf config.Module, err error) {
 	mgr.failedModulesMu.Lock()
-	mgr.failedModules[moduleName] = true
-	mgr.failedModulesMu.Unlock()
+	defer mgr.failedModulesMu.Unlock()
+	if existing, ok := mgr.failedModules[moduleName]; ok {
+		existing.conf = conf
+		existing.err = err
+		existing.lastFailedAt = time.Now()
+		existing.consecutiveFailures++
+		return
+	}
+	mgr.failedModules[moduleName] = &failedModuleInfo{
+		conf:                conf,
+		err:                 err,
+		lastFailedAt:        time.Now(),
+		consecutiveFailures: 1,
+	}
 }
 
 func (mgr *Manager) deleteFromFailedModules(moduleName string) {
@@ -1184,6 +1210,61 @@ func (mgr *Manager) FailedModules() []string {
 // Modules will be added to failedModules as they fail during the reconfigure process.
 func (mgr *Manager) ClearFailedModules() {
 	mgr.failedModulesMu.Lock()
-	mgr.failedModules = make(map[string]bool)
+	mgr.failedModules = make(map[string]*failedModuleInfo)
 	mgr.failedModulesMu.Unlock()
+}
+
+// Status returns a snapshot of the current state of every module known to the
+// manager. A module appears in failedModules if and only if it is currently
+// considered unhealthy; otherwise its state is derived from membership in
+// mgr.modules and the pendingRemoval flag on the *module. PENDING / FIRST_RUN /
+// STARTING are not yet observable because the *module struct is only retained
+// after successful startup.
+func (mgr *Manager) Status() []robot.ModuleStatus {
+	mgr.failedModulesMu.RLock()
+	failedSnapshot := make(map[string]*failedModuleInfo, len(mgr.failedModules))
+	for name, info := range mgr.failedModules {
+		failedSnapshot[name] = info
+	}
+	mgr.failedModulesMu.RUnlock()
+
+	statuses := make([]robot.ModuleStatus, 0, len(failedSnapshot))
+	seen := make(map[string]struct{}, len(failedSnapshot))
+
+	mgr.modules.Range(func(name string, mod *module) bool {
+		seen[name] = struct{}{}
+		if info, ok := failedSnapshot[name]; ok {
+			statuses = append(statuses, robot.ModuleStatus{
+				Name:                name,
+				State:               robot.ModuleStateUnhealthy,
+				LastUpdated:         info.lastFailedAt,
+				Error:               info.err,
+				ConsecutiveFailures: info.consecutiveFailures,
+			})
+			return true
+		}
+		state := robot.ModuleStateReady
+		if mod.pendingRemoval {
+			state = robot.ModuleStateRemoving
+		}
+		statuses = append(statuses, robot.ModuleStatus{
+			Name:  name,
+			State: state,
+		})
+		return true
+	})
+
+	for name, info := range failedSnapshot {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		statuses = append(statuses, robot.ModuleStatus{
+			Name:                name,
+			State:               robot.ModuleStateUnhealthy,
+			LastUpdated:         info.lastFailedAt,
+			Error:               info.err,
+			ConsecutiveFailures: info.consecutiveFailures,
+		})
+	}
+	return statuses
 }

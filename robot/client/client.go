@@ -1315,6 +1315,38 @@ func (rc *RobotClient) MachineStatus(ctx context.Context) (robot.MachineStatus, 
 		}
 	}
 
+	if len(resp.GetModules()) > 0 {
+		mStatus.Modules = make([]robot.ModuleStatus, 0, len(resp.GetModules()))
+		for _, pbModStatus := range resp.GetModules() {
+			modStatus := robot.ModuleStatus{
+				Name:                pbModStatus.GetModuleName(),
+				LastUpdated:         pbModStatus.GetLastUpdated().AsTime(),
+				ConsecutiveFailures: int(pbModStatus.GetConsecutiveFailures()),
+			}
+			switch pbModStatus.GetState() {
+			case pb.ModuleStatus_STATE_UNSPECIFIED:
+				rc.logger.CErrorw(ctx, "received module in an unspecified state", "module", modStatus.Name)
+				modStatus.State = robot.ModuleStateUnknown
+			case pb.ModuleStatus_STATE_PENDING:
+				modStatus.State = robot.ModuleStatePending
+			case pb.ModuleStatus_STATE_FIRST_RUN:
+				modStatus.State = robot.ModuleStateFirstRun
+			case pb.ModuleStatus_STATE_STARTING:
+				modStatus.State = robot.ModuleStateStarting
+			case pb.ModuleStatus_STATE_READY:
+				modStatus.State = robot.ModuleStateReady
+			case pb.ModuleStatus_STATE_UNHEALTHY:
+				modStatus.State = robot.ModuleStateUnhealthy
+			case pb.ModuleStatus_STATE_REMOVING:
+				modStatus.State = robot.ModuleStateRemoving
+			}
+			if errStr := pbModStatus.GetError(); errStr != "" {
+				modStatus.Error = errors.New(errStr)
+			}
+			mStatus.Modules = append(mStatus.Modules, modStatus)
+		}
+	}
+
 	return mStatus, nil
 }
 

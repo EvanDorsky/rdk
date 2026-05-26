@@ -1942,6 +1942,7 @@ func (r *localRobot) Shutdown(ctx context.Context) error {
 
 // MachineStatus returns the current status of the robot.
 func (r *localRobot) MachineStatus(ctx context.Context) (robot.MachineStatus, error) {
+
 	var result robot.MachineStatus
 
 	remoteMdMap := r.manager.getRemoteResourceMetadata(ctx)
@@ -1988,6 +1989,10 @@ func (r *localRobot) MachineStatus(ctx context.Context) (robot.MachineStatus, er
 				}
 			}
 		}
+	}
+
+	if r.manager.moduleManager != nil {
+		result.Modules = r.manager.moduleManager.Status()
 	}
 
 	return result, nil

@@ -348,16 +348,54 @@ const (
 
 // MachineStatus encapsulates the current status of the robot.
 type MachineStatus struct {
-	Resources   []resource.Status
+	Resources []resource.Status
+
 	Config      config.Revision
 	State       MachineState
 	JobStatuses map[string]JobStatus
+	Modules     []ModuleStatus
 }
 
 // JobStatus encapsulates status information about a single JobManager job.
 type JobStatus struct {
 	RecentSuccessfulRuns []time.Time
 	RecentFailedRuns     []time.Time
+}
+
+// ModuleState captures the lifecycle state of a module.
+type ModuleState uint8
+
+const (
+	// ModuleStateUnknown represents an unknown state.
+	ModuleStateUnknown ModuleState = iota
+	// ModuleStatePending denotes a module that is configured but viam-server
+	// has not yet attempted to start (e.g. while waiting on a package download).
+	ModuleStatePending
+	// ModuleStateFirstRun denotes a module whose first-run setup script is executing.
+	ModuleStateFirstRun
+	// ModuleStateStarting denotes a module whose process has been spawned and
+	// viam-server is awaiting Ready and model registration.
+	ModuleStateStarting
+	// ModuleStateReady denotes a module that has started, sent Ready, and registered its models.
+	ModuleStateReady
+	// ModuleStateUnhealthy denotes a module that failed to start, exited unexpectedly,
+	// or is in the middle of being restarted after a crash.
+	ModuleStateUnhealthy
+	// ModuleStateRemoving denotes a module that is being removed from the machine.
+	ModuleStateRemoving
+)
+
+// ModuleStatus encapsulates the status of a single module.
+type ModuleStatus struct {
+	Name        string
+	State       ModuleState
+	LastUpdated time.Time
+	Error       error
+	// ConsecutiveFailures is the number of consecutive failures recorded for
+	// this module in the current failure episode (initial startup failures plus
+	// crash/restart attempts). Resets to zero on a successful start or
+	// reconfigure. Useful for detecting modules stuck in a restart loop.
+	ConsecutiveFailures int
 }
 
 // VersionResponse encapsulates the version info of the robot.

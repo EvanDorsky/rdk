@@ -586,6 +586,38 @@ func (s *Server) GetMachineStatus(ctx context.Context, _ *pb.GetMachineStatusReq
 		}
 	}
 
+	if len(mStatus.Modules) > 0 {
+		result.Modules = make([]*pb.ModuleStatus, 0, len(mStatus.Modules))
+		for _, modStatus := range mStatus.Modules {
+			pbModStatus := &pb.ModuleStatus{
+				ModuleName:          modStatus.Name,
+				LastUpdated:         timestamppb.New(modStatus.LastUpdated),
+				ConsecutiveFailures: int32(modStatus.ConsecutiveFailures),
+			}
+			switch modStatus.State {
+			case robot.ModuleStateUnknown:
+				s.robot.Logger().CErrorw(ctx, "module in an unknown state", "module", modStatus.Name)
+				pbModStatus.State = pb.ModuleStatus_STATE_UNSPECIFIED
+			case robot.ModuleStatePending:
+				pbModStatus.State = pb.ModuleStatus_STATE_PENDING
+			case robot.ModuleStateFirstRun:
+				pbModStatus.State = pb.ModuleStatus_STATE_FIRST_RUN
+			case robot.ModuleStateStarting:
+				pbModStatus.State = pb.ModuleStatus_STATE_STARTING
+			case robot.ModuleStateReady:
+				pbModStatus.State = pb.ModuleStatus_STATE_READY
+			case robot.ModuleStateUnhealthy:
+				pbModStatus.State = pb.ModuleStatus_STATE_UNHEALTHY
+			case robot.ModuleStateRemoving:
+				pbModStatus.State = pb.ModuleStatus_STATE_REMOVING
+			}
+			if modStatus.Error != nil {
+				pbModStatus.Error = modStatus.Error.Error()
+			}
+			result.Modules = append(result.Modules, pbModStatus)
+		}
+	}
+
 	return &result, nil
 }
 

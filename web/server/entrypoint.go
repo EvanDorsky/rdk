@@ -24,6 +24,7 @@ import (
 	"go.viam.com/utils/rpc"
 
 	"go.viam.com/rdk/config"
+	"go.viam.com/rdk/events"
 	"go.viam.com/rdk/grpc"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
@@ -685,6 +686,13 @@ func (s *robotServer) serveWeb(ctx context.Context, cfg *config.Config) (err err
 	if err != nil {
 		return err
 	}
+
+	eventsLogger := events.NewLogger(s.rootLogger)
+	serverInfo := map[string]any{"pid": os.Getpid(), "version": config.Version}
+	eventsLogger.Log("server_start", "server", serverInfo)
+	// web.RunWeb blocks until the server begins graceful shutdown; this defer
+	// runs before the deferred robot close above.
+	defer eventsLogger.Log("server_stop", "server", serverInfo)
 	return web.RunWeb(ctx, theRobot, options, s.rootLogger)
 }
 

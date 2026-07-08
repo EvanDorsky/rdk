@@ -42,6 +42,7 @@ import (
 	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/config"
+	"go.viam.com/rdk/events"
 	"go.viam.com/rdk/ftdc"
 	"go.viam.com/rdk/ftdc/sys"
 	icloud "go.viam.com/rdk/internal/cloud"
@@ -100,6 +101,7 @@ type localRobot struct {
 	localPackages           packages.ManagerSyncer
 	cloudConnSvc            icloud.ConnectionService
 	logger                  logging.Logger
+	eventsLogger            *events.Logger
 	activeBackgroundWorkers sync.WaitGroup
 
 	// reconfigurationLock manages access to the resource graph and nodes. If either may change, this lock should be taken.
@@ -519,6 +521,7 @@ func newWithResources(
 		),
 		operations:              operation.NewManager(logger),
 		logger:                  logger,
+		eventsLogger:            events.NewLogger(logger),
 		closeContext:            closeCtx,
 		cancelBackgroundWorkers: cancel,
 		// triggerConfig buffers 1 message so that we can queue up to 1 reconfiguration attempt
@@ -1902,6 +1905,15 @@ func (r *localRobot) reconfigure(ctx context.Context, newConfig *config.Config, 
 
 	if diff.ResourcesEqual {
 		return
+	}
+
+	// Configs applied as part of server startup are marked Initial by the web
+	// entrypoint; that pass is not a reconfigure and is already covered by the
+	// server_start event. r.initializing cannot serve as the gate here because
+	// it is only primed at the end of the first pass.
+	if !newConfig.Initial {
+		r.eventsLogger.Log("reconfigure_start", "server", map[string]any{"revision": newConfig.Revision})
+		defer r.eventsLogger.Log("reconfigure_end", "server", map[string]any{"revision": newConfig.Revision})
 	}
 
 	logVerb := "Construct"

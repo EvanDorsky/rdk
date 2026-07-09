@@ -94,14 +94,18 @@ type localRobot struct {
 	manager       *resourceManager
 	mostRecentCfg atomic.Value // config.Config
 
-	operations              *operation.Manager
-	sessionManager          session.Manager
-	packageManager          packages.ManagerSyncer
-	jobManager              *jobmanager.JobManager
-	localPackages           packages.ManagerSyncer
-	cloudConnSvc            icloud.ConnectionService
-	logger                  logging.Logger
-	eventsLogger            *events.Logger
+	operations     *operation.Manager
+	sessionManager session.Manager
+	packageManager packages.ManagerSyncer
+	jobManager     *jobmanager.JobManager
+	localPackages  packages.ManagerSyncer
+	cloudConnSvc   icloud.ConnectionService
+	logger         logging.Logger
+	eventsLogger   *events.Logger
+	// eventsArmed is false until the first full (non-Initial) config pass
+	// completes, so startup config application does not emit reconfigure
+	// events; startup is covered by the server_start event.
+	eventsArmed             atomic.Bool
 	activeBackgroundWorkers sync.WaitGroup
 
 	// reconfigurationLock manages access to the resource graph and nodes. If either may change, this lock should be taken.
@@ -1673,6 +1677,9 @@ func (r *localRobot) reconfigure(ctx context.Context, newConfig *config.Config, 
 		// be equal or `reconfigure` may otherwise return early, but we still want to move
 		// from a state of initializing to running as dictated by the config value.
 		r.initializing.Store(newConfig.Initial)
+		if !newConfig.Initial {
+			r.eventsArmed.Store(true)
+		}
 	}()
 
 	// No need to check whether reconfiguring is allowed if this is initialization.
@@ -1907,11 +1914,10 @@ func (r *localRobot) reconfigure(ctx context.Context, newConfig *config.Config, 
 		return
 	}
 
-	// Configs applied as part of server startup are marked Initial by the web
-	// entrypoint; that pass is not a reconfigure and is already covered by the
-	// server_start event. r.initializing cannot serve as the gate here because
-	// it is only primed at the end of the first pass.
-	if !newConfig.Initial {
+	// eventsArmed stays false through both startup passes (the Initial-marked
+	// minimal config and the first full config), so resource construction at
+	// boot does not read as a reconfigure; startup is covered by server_start.
+	if r.eventsArmed.Load() {
 		r.eventsLogger.Log("reconfigure_start", "server", map[string]any{"revision": newConfig.Revision})
 		defer r.eventsLogger.Log("reconfigure_end", "server", map[string]any{"revision": newConfig.Revision})
 	}
